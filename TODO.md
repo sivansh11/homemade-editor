@@ -1,0 +1,1 @@
+fix bug, creating surface needs to set pixels (current renderpass load is load and not clear)
