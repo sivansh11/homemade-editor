@@ -83,14 +83,17 @@ struct font_t {
     const msdf_atlas::FontGeometry& geometry() const; 
     core::ref<gfx::vulkan::image_t> atlas() const;
     core::ref<gfx::vulkan::descriptor_set_t> descriptor_set() const;
+    float line_height(float target_font_size) const;
 
     uint32_t _font_id;
     float _original_font_size;
     float _max_height;
+    float _line_height;
 };
 
 surface_t create_surface(const glm::vec2& size);
 surface_t get_screen_surface();
+void resize_surface(surface_t surface, const glm::vec2& size);
 
 font_t create_font(float font_size, const std::filesystem::path& path);
 

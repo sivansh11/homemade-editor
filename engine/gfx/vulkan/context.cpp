@@ -967,6 +967,7 @@ void context_t::create_descriptor_pool() {
     descriptor_pool_create_info.poolSizeCount = pool_sizes.size();
     descriptor_pool_create_info.pPoolSizes = pool_sizes.data();
     descriptor_pool_create_info.maxSets = 1000 * 7;
+    descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 
     if (vkCreateDescriptorPool(_device, &descriptor_pool_create_info, nullptr, &_descriptor_pool) != VK_SUCCESS) {
         ERROR("Failed to create descriptor pool");

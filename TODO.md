@@ -1,1 +1,3 @@
-fix bug, creating surface needs to set pixels (current renderpass load is load and not clear)
+add surface resizing
+add window resizing
+fix transparency

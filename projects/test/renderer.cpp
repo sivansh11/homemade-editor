@@ -85,7 +85,7 @@ struct command_t {
         command_fill_surface_t fill_surface;
         command_draw_surface_t draw_surface;
         command_draw_text_t draw_text;
-    } command;
+    } as;
 };
 
 // maybe expose this ?
@@ -228,7 +228,11 @@ bool init(const std::string& title, uint32_t width, uint32_t height) {
     s_renderer_data._screen_surface = create_surface(glm::vec2{ width, height });
     s_renderer_data._gfx_context->add_resize_callback([]() {
         auto [width, height] = s_renderer_data._window->get_dimensions();
-        s_renderer_data._screen_surface = create_surface(glm::vec2{ width, height });  
+        resize_surface(s_renderer_data._screen_surface, {width, height});
+        s_renderer_data._swapchain_descriptor_set = s_renderer_data._swapchain_descriptor_set_layout->new_descriptor_set();
+        s_renderer_data._swapchain_descriptor_set->write()
+            .pushImageInfo(0, 1, get_screen_surface().image()->descriptor_info(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+            .update();
     });
     
     // pipeline and descriptors
@@ -236,7 +240,6 @@ bool init(const std::string& title, uint32_t width, uint32_t height) {
     s_renderer_data._swapchain_descriptor_set->write()
         .pushImageInfo(0, 1, get_screen_surface().image()->descriptor_info(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         .update();
-
     s_renderer_data._swapchain_pipeline = gfx::vulkan::pipeline_builder_t{}
         .add_shader("../../assets/shaders/swapchain/glsl.vert")
         .add_shader("../../assets/shaders/swapchain/glsl.frag")
@@ -393,6 +396,12 @@ core::ref<gfx::vulkan::descriptor_set_t> font_t::descriptor_set() const {
     return s_renderer_data._font_descriptor_sets[_font_id - 1];
 }
 
+float font_t::line_height(float target_font_size) const {
+    VIZON_PROFILE_FUNCTION();
+    assert(s_renderer_data._initialized);
+    return _line_height * target_font_size;
+}
+
 surface_t create_surface(const glm::vec2& size) {
     VIZON_PROFILE_FUNCTION();
     assert(s_renderer_data._initialized);
@@ -449,6 +458,55 @@ surface_t get_screen_surface() {
     VIZON_PROFILE_FUNCTION();
     assert(s_renderer_data._initialized);
     return s_renderer_data._screen_surface;
+}
+
+void resize_surface(surface_t surface, const glm::vec2& size) {
+    VIZON_PROFILE_FUNCTION();
+    assert(s_renderer_data._initialized);
+    core::ref<gfx::vulkan::image_t> image = gfx::vulkan::image_builder_t{}
+        .build2D(s_renderer_data._gfx_context, size.x, size.y, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    core::ref<gfx::vulkan::framebuffer_t> framebuffer = gfx::vulkan::framebuffer_builder_t{}
+        .add_attachment_view(image->image_view())
+        .build(s_renderer_data._gfx_context, s_renderer_data._renderpass->renderpass(), size.x, size.y);
+    core::ref<gfx::vulkan::gpu_timer_t> gpu_timer = core::make_ref<gfx::vulkan::gpu_timer_t>(s_renderer_data._gfx_context);
+    core::ref<gfx::vulkan::descriptor_set_t> projection_descriptor_set = s_renderer_data._projection_descriptor_set_layout->new_descriptor_set();
+    core::ref<gfx::vulkan::descriptor_set_t> surface_image_descriptor_set = s_renderer_data._surface_image_descriptor_set_layout->new_descriptor_set();
+    core::ref<gfx::vulkan::buffer_t> uniform_buffer = gfx::vulkan::buffer_builder_t{}
+        .build(s_renderer_data._gfx_context, sizeof(uniform_buffer_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    core::ref<gfx::vulkan::buffer_t> staging_buffer = gfx::vulkan::buffer_builder_t{}
+        .build(s_renderer_data._gfx_context, sizeof(uniform_buffer_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    
+    uniform_buffer_t *_uniform_buffer = (uniform_buffer_t *)staging_buffer->map();
+    _uniform_buffer->projection = glm::ortho(-float(size.x) / 2.f, float(size.x) / 2.f, -float(size.y) / 2.f, float(size.y) / 2.f);
+    gfx::vulkan::buffer_t::copy(s_renderer_data._gfx_context, *staging_buffer, *uniform_buffer, VkBufferCopy{
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = sizeof(uniform_buffer_t),
+    });
+    
+    projection_descriptor_set->write()
+        .pushBufferInfo(0, 1, uniform_buffer->descriptor_info())
+        .update();
+    
+    surface_image_descriptor_set->write()
+        .pushImageInfo(0, 1, image->descriptor_info(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+        .update();
+    
+    s_renderer_data._gfx_context->wait_idle();
+    
+    s_renderer_data._surface_size_vector[surface._surface_id - 1] = size;
+    s_renderer_data._surface_image_vector[surface._surface_id - 1] = image;
+    s_renderer_data._surface_framebuffer_vector[surface._surface_id - 1] = framebuffer;
+    s_renderer_data._surface_projection_descriptor_set_vector[surface._surface_id - 1] = projection_descriptor_set;
+    s_renderer_data._surface_image_descriptor_set_vector[surface._surface_id - 1] = surface_image_descriptor_set;
+    s_renderer_data._surface_uniform_buffer_vector[surface._surface_id - 1] = uniform_buffer;
+
+    s_renderer_data._gfx_context->single_use_commandbuffer([&](VkCommandBuffer commandbuffer) {
+        image->transition_layout(commandbuffer, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // _start_renderpass(commandbuffer, surface, glm::vec4{0, 0, 0, 0});
+        // _end_renderpass(commandbuffer, surface);
+    });
+    draw_rect(surface, surface.rect({0, 0}), {0, 0, 0, 0});
 }
 
 font_t create_font(float font_size, const std::filesystem::path& path) {
@@ -538,7 +596,7 @@ font_t create_font(float font_size, const std::filesystem::path& path) {
 
     core::ref<gfx::vulkan::descriptor_set_t> descriptor_set = s_renderer_data._font_descriptor_set_layout->new_descriptor_set();
     descriptor_set->write()
-        .pushImageInfo(0, 1, atlas->descriptor_info(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+        .pushImageInfo(0, 1, atlas->descriptor_info(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, gfx::vulkan::sampler_create_info_t{.mag_filter=VK_FILTER_LINEAR, .min_filter = VK_FILTER_LINEAR, .mipmap_mode=VK_SAMPLER_MIPMAP_MODE_LINEAR}))
         .update();
 
     s_renderer_data._font_geometries.push_back(geometry);
@@ -552,11 +610,12 @@ font_t create_font(float font_size, const std::filesystem::path& path) {
         glyph_data_t data = _get_data_from_glyph(&glyph, font_size);
         max_height = std::max(max_height, float(data.height + data.bearing_underline));
     }
-
+    
     font_t font{};
     font._font_id = ++s_renderer_data._font_counter;
     font._original_font_size = font_size;
     font._max_height = max_height;
+    font._line_height = geometry.getMetrics().lineHeight;
     return font;
 }
 
@@ -569,7 +628,7 @@ void draw_rect(const surface_t& surface, const rect_t& rect, const glm::vec4& co
     draw_rect.surface = surface;
     draw_rect.rect = rect;
     draw_rect.color = color;
-    command.command.draw_rect = draw_rect;
+    command.as.draw_rect = draw_rect;
     s_renderer_data._commands.push_back(command);
 }
 
@@ -581,7 +640,7 @@ void draw_circle(const surface_t& surface, const circle_t& circle, const glm::ve
     draw_circle.surface = surface;
     draw_circle.circle = circle;
     draw_circle.color = color;
-    command.command.draw_circle = draw_circle;
+    command.as.draw_circle = draw_circle;
     s_renderer_data._commands.push_back(command);
 }
 
@@ -592,7 +651,7 @@ void fill_surface(const surface_t& surface, const glm::vec4& color) {
     command_fill_surface_t fill_surface;
     fill_surface.surface = surface;
     fill_surface.color = color;
-    command.command.fill_surface = fill_surface;
+    command.as.fill_surface = fill_surface;
     s_renderer_data._commands.push_back(command);
 }
 
@@ -604,7 +663,7 @@ void draw_surface(const surface_t& surface, const surface_t& other_surface, cons
     draw_surface.surface = surface;
     draw_surface.other_surface = other_surface;
     draw_surface.rect = rect;
-    command.command.draw_surface = draw_surface;
+    command.as.draw_surface = draw_surface;
     s_renderer_data._commands.push_back(command);
 }
 
@@ -619,7 +678,7 @@ glm::vec2 draw_text(const surface_t& surface, const font_t& font, const char *te
     draw_text.color = color;
     draw_text.position = position;
     draw_text.font_size = font_size;
-    command.command.draw_text = draw_text;
+    command.as.draw_text = draw_text;
     s_renderer_data._commands.push_back(command);
 
     float target_font_size = draw_text.font_size;
@@ -800,7 +859,7 @@ void _command_draw_circle(VkCommandBuffer commandbuffer, const command_draw_circ
     circle_push_constant_t push{};
     transform_2d_t transform{};
     // TODO: fix circles
-    transform.position = glm::vec3{ draw_circle.circle.position, 0 };
+    transform.position = glm::vec3{ draw_circle.circle.position - (surface.size() / 2.f), 0 };
     transform.scale = glm::vec2{ draw_circle.circle.radius };
     push.model_matrix = transform.matrix();
     push.color = draw_circle.color;
@@ -932,23 +991,23 @@ void render() {
         for (auto command : s_renderer_data._commands) {
             switch (command.command_type) {
                 case command_type_t::e_draw_rect: 
-                    _command_draw_rect(commandbuffer, command.command.draw_rect);
+                    _command_draw_rect(commandbuffer, command.as.draw_rect);
                     break;
 
                 case command_type_t::e_draw_circle: 
-                    _command_draw_circle(commandbuffer, command.command.draw_circle);
+                    _command_draw_circle(commandbuffer, command.as.draw_circle);
                     break;
                 
                 case command_type_t::e_fill_surface: 
-                    _command_fill_surface(commandbuffer, command.command.fill_surface);
+                    _command_fill_surface(commandbuffer, command.as.fill_surface);
                     break;
                 
                 case command_type_t::e_draw_surface: 
-                    _command_draw_surface(commandbuffer, command.command.draw_surface);
+                    _command_draw_surface(commandbuffer, command.as.draw_surface);
                     break;
                 
                 case command_type_t::e_draw_text: 
-                    _command_draw_text(commandbuffer, command.command.draw_text);
+                    _command_draw_text(commandbuffer, command.as.draw_text);
                     break;
 
                 default:

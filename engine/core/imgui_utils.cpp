@@ -57,17 +57,16 @@ void ImGui_init(core::ref<core::window_t> window, core::ref<gfx::vulkan::context
     initInfo.ImageCount = context->swapchain_image_count();
     initInfo.CheckVkResultFn = checkVkResult;
     initInfo.Subpass = 0;
+    initInfo.RenderPass = context->swapchain_renderpass();
 
     ImGui_ImplVulkan_LoadFunctions([](const char *function_name, void *vulkan_instance) {
         return vkGetInstanceProcAddr(*(reinterpret_cast<VkInstance *>(vulkan_instance)), function_name);
     }, &context->instance());
 
-    ImGui_ImplVulkan_Init(&initInfo, context->swapchain_renderpass());
+    ImGui_ImplVulkan_Init(&initInfo);
     
-    context->single_use_commandbuffer([](VkCommandBuffer commandBuffer) {
-        ImGui_ImplVulkan_CreateFontsTexture(commandBuffer);
-    });
-    ImGui_ImplVulkan_DestroyFontUploadObjects();
+    // ImGui_ImplVulkan_CreateFontsTexture();
+
 }
 
 void ImGui_shutdown() {
